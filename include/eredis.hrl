@@ -36,3 +36,5 @@
 -define(SOCKET_OPTS, [binary, {active, once}, {packet, raw}, {reuseaddr, true}, {keepalive, true}]).
 
 -define(RECV_TIMEOUT, 5000).
+
+-define(HIBERNATE_TIMEOUT, application:get_env(eredis, hibernate_timeout, hibernate)).

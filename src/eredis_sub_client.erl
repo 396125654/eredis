@@ -57,7 +57,7 @@ init([Host, Port, Password, ReconnectSleep, MaxQueueSize, QueueBehaviour]) ->
     case connect(State) of
         {ok, NewState} ->
             ok = inet:setopts(NewState#state.socket, [{active, once}]),
-            {ok, NewState};
+            {ok, NewState, ?HIBERNATE_TIMEOUT};
         {error, Reason} ->
             {stop, {connection_error, Reason}}
     end.
@@ -71,17 +71,18 @@ handle_call({controlling_process, Pid}, _From, State) ->
             erlang:demonitor(OldRef)
     end,
     Ref = erlang:monitor(process, Pid),
-    {reply, ok, State#state{controlling_process={Ref, Pid}, msg_state = ready}};
+    {reply, ok, State#state{controlling_process={Ref, Pid}, msg_state = ready},
+     ?HIBERNATE_TIMEOUT};
 
 handle_call(get_channels, _From, State) ->
-    {reply, {ok, State#state.channels}, State};
+    {reply, {ok, State#state.channels}, State, ?HIBERNATE_TIMEOUT};
 
 
 handle_call(stop, _From, State) ->
     {stop, normal, ok, State};
 
 handle_call(_Request, _From, State) ->
-    {reply, unknown_request, State}.
+    {reply, unknown_request, State, ?HIBERNATE_TIMEOUT}.
 
 
 %% Controlling process acks, but we have no connection. When the
@@ -89,7 +90,7 @@ handle_call(_Request, _From, State) ->
 %% again.
 handle_cast({ack_message, Pid},
             #state{controlling_process={_, Pid}, socket = undefined} = State) ->
-    {noreply, State#state{msg_state = ready}};
+    {noreply, State#state{msg_state = ready}, ?HIBERNATE_TIMEOUT};
 
 %% Controlling process acknowledges receipt of previous message. Send
 %% the next if there is any messages queued or ask for more on the
@@ -103,20 +104,20 @@ handle_cast({ack_message, Pid},
                        send_to_controller(Msg, State),
                        State#state{msg_queue = Queue, msg_state = need_ack}
                end,
-    {noreply, NewState};
+    {noreply, NewState, ?HIBERNATE_TIMEOUT};
 
 handle_cast({subscribe, Pid, Channels}, #state{controlling_process = {_, Pid}} = State) ->
     Command = eredis:create_multibulk(["SUBSCRIBE" | Channels]),
     ok = gen_tcp:send(State#state.socket, Command),
     NewChannels = add_channels(Channels, State#state.channels),
-    {noreply, State#state{channels = NewChannels}};
+    {noreply, State#state{channels = NewChannels}, ?HIBERNATE_TIMEOUT};
 
 
 handle_cast({psubscribe, Pid, Channels}, #state{controlling_process = {_, Pid}} = State) ->
     Command = eredis:create_multibulk(["PSUBSCRIBE" | Channels]),
     ok = gen_tcp:send(State#state.socket, Command),
     NewChannels = add_channels(Channels, State#state.channels),
-    {noreply, State#state{channels = NewChannels}};
+    {noreply, State#state{channels = NewChannels}, ?HIBERNATE_TIMEOUT};
 
 
 
@@ -124,7 +125,7 @@ handle_cast({unsubscribe, Pid, Channels}, #state{controlling_process = {_, Pid}}
     Command = eredis:create_multibulk(["UNSUBSCRIBE" | Channels]),
     ok = gen_tcp:send(State#state.socket, Command),
     NewChannels = remove_channels(Channels, State#state.channels),
-    {noreply, State#state{channels = NewChannels}};
+    {noreply, State#state{channels = NewChannels}, ?HIBERNATE_TIMEOUT};
 
 
 
@@ -132,15 +133,15 @@ handle_cast({punsubscribe, Pid, Channels}, #state{controlling_process = {_, Pid}
     Command = eredis:create_multibulk(["PUNSUBSCRIBE" | Channels]),
     ok = gen_tcp:send(State#state.socket, Command),
     NewChannels = remove_channels(Channels, State#state.channels),
-    {noreply, State#state{channels = NewChannels}};
+    {noreply, State#state{channels = NewChannels}, ?HIBERNATE_TIMEOUT};
 
 
 
 handle_cast({ack_message, _}, State) ->
-    {noreply, State};
+    {noreply, State, ?HIBERNATE_TIMEOUT};
 
 handle_cast(_Msg, State) ->
-    {noreply, State}.
+    {noreply, State, ?HIBERNATE_TIMEOUT}.
 
 
 %% Receive data from socket, see handle_response/2
@@ -154,17 +155,17 @@ handle_info({tcp, _Socket, Bs}, State) ->
                 drop ->
                     Msg = {dropped, queue:len(NewState#state.msg_queue)},
                     send_to_controller(Msg, NewState),
-                    {noreply, NewState#state{msg_queue = queue:new()}};
+                    {noreply, NewState#state{msg_queue = queue:new()}, ?HIBERNATE_TIMEOUT};
                 exit ->
                     {stop, max_queue_size, State}
             end;
         false ->
-            {noreply, NewState}
+            {noreply, NewState, ?HIBERNATE_TIMEOUT}
     end;
 
 handle_info({tcp_error, _Socket, _Reason}, State) ->
     %% This will be followed by a close
-    {noreply, State};
+    {noreply, State, ?HIBERNATE_TIMEOUT};
 
 %% Socket got closed, for example by Redis terminating idle
 %% clients. If desired, spawn of a new process which will try to reconnect and
@@ -181,25 +182,25 @@ handle_info({tcp_closed, _Socket}, State) ->
 
     %% Throw away the socket. The absence of a socket is used to
     %% signal we are "down"
-    {noreply, State#state{socket = undefined}};
+    {noreply, State#state{socket = undefined}, ?HIBERNATE_TIMEOUT};
 
 %% Controller might want to be notified about every reconnect attempt
 handle_info(reconnect_attempt, State) ->
     send_to_controller({eredis_reconnect_attempt, self()}, State),
-    {noreply, State};
+    {noreply, State, ?HIBERNATE_TIMEOUT};
 
 %% Controller might want to be notified about every reconnect failure and reason
 handle_info({reconnect_failed, Reason}, State) ->
     send_to_controller({eredis_reconnect_failed, self(),
                         {error, {connection_error, Reason}}}, State),
-    {noreply, State};
+    {noreply, State, ?HIBERNATE_TIMEOUT};
 
 %% Redis is ready to accept requests, the given Socket is a socket
 %% already connected and authenticated.
 handle_info({connection_ready, Socket}, #state{socket = undefined} = State) ->
     send_to_controller({eredis_connected, self()}, State),
     ok = inet:setopts(Socket, [{active, once}]),
-    {noreply, State#state{socket = Socket}};
+    {noreply, State#state{socket = Socket}, ?HIBERNATE_TIMEOUT};
 
 
 %% Our controlling process is down.
@@ -213,6 +214,10 @@ handle_info({'DOWN', Ref, process, Pid, _Reason},
 %% that Poolboy uses to manage the connections.
 handle_info(stop, State) ->
     {stop, shutdown, State};
+
+handle_info(timeout, State) ->
+    proc_lib:hibernate(gen_server, enter_loop, [?MODULE, [], State]),
+    {noreply, State, ?HIBERNATE_TIMEOUT};
 
 handle_info(_Info, State) ->
     {stop, {unhandled_message, _Info}, State}.

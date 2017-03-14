@@ -82,12 +82,12 @@ init([Host, Port, Database, Password, ReconnectSleep, ConnectTimeout]) ->
 
     case connect(State) of
         {ok, NewState} ->
-            {ok, NewState};
+            {ok, NewState, ?HIBERNATE_TIMEOUT};
         {error, Reason} ->
             error_logger:error_msg("redis connect error: host=~p,reason=~p",
                                    [Host, Reason]),
             self() ! {tcp_closed, undefined},
-            {ok, State}
+            {ok, State, ?HIBERNATE_TIMEOUT}
     end.
 
 handle_call({request, Req}, From, State) ->
@@ -100,25 +100,25 @@ handle_call(stop, _From, State) ->
     {stop, normal, ok, State};
 
 handle_call(_Request, _From, State) ->
-    {reply, unknown_request, State}.
+    {reply, unknown_request, State, ?HIBERNATE_TIMEOUT}.
 
 
 handle_cast({request, Req}, State) ->
     case do_request(Req, undefined, State) of
-        {reply, _Reply, State1} ->
-            {noreply, State1};
-        {noreply, State1} ->
-            {noreply, State1}
+        {reply, _Reply, State1, _} ->
+            {noreply, State1, ?HIBERNATE_TIMEOUT};
+        {noreply, State1, _} ->
+            {noreply, State1, ?HIBERNATE_TIMEOUT}
     end;
 
 handle_cast(_Msg, State) ->
-    {noreply, State}.
+    {noreply, State, ?HIBERNATE_TIMEOUT}.
 
 %% Receive data from socket, see handle_response/2. Match `Socket' to
 %% enforce sanity.
 handle_info({tcp, Socket, Bs}, #state{socket = Socket} = State) ->
     ok = inet:setopts(Socket, [{active, once}]),
-    {noreply, handle_response(Bs, State)};
+    {noreply, handle_response(Bs, State), ?HIBERNATE_TIMEOUT};
 
 handle_info({tcp, Socket, _}, #state{socket = OurSocket} = State)
   when OurSocket =/= Socket ->
@@ -127,11 +127,11 @@ handle_info({tcp, Socket, _}, #state{socket = OurSocket} = State)
     %% tcp_closed message with clients waiting in queue, we send a
     %% fake tcp_close message. This allows us to ignore messages that
     %% arrive after that while we are reconnecting.
-    {noreply, State};
+    {noreply, State, ?HIBERNATE_TIMEOUT};
 
 handle_info({tcp_error, _Socket, _Reason}, State) ->
     %% This will be followed by a close
-    {noreply, State};
+    {noreply, State, ?HIBERNATE_TIMEOUT};
 
 %% Socket got closed, for example by Redis terminating idle
 %% clients. If desired, spawn of a new process which will try to reconnect and
@@ -154,17 +154,22 @@ handle_info({tcp_closed, _Socket}, #state{queue = Queue} = State) ->
     %% Throw away the socket and the queue, as we will never get a
     %% response to the requests sent on the old socket. The absence of
     %% a socket is used to signal we are "down"
-    {noreply, State#state{socket = undefined, queue = queue:new()}};
+    {noreply, State#state{socket = undefined, queue = queue:new()},
+     ?HIBERNATE_TIMEOUT};
 
 %% Redis is ready to accept requests, the given Socket is a socket
 %% already connected and authenticated.
 handle_info({connection_ready, Socket}, #state{socket = undefined} = State) ->
-    {noreply, State#state{socket = Socket}};
+    {noreply, State#state{socket = Socket}, ?HIBERNATE_TIMEOUT};
 
 %% eredis can be used in Poolboy, but it requires to support a simple API
 %% that Poolboy uses to manage the connections.
 handle_info(stop, State) ->
     {stop, shutdown, State};
+
+handle_info(timeout, State) ->
+    proc_lib:hibernate(gen_server, enter_loop, [?MODULE, [], State]),
+    {noreply, State, ?HIBERNATE_TIMEOUT};
 
 handle_info(_Info, State) ->
     {stop, {unhandled_message, _Info}, State}.
@@ -184,35 +189,37 @@ code_change(_OldVsn, State, _Extra) ->
 %%--------------------------------------------------------------------
 
 -spec do_request(Req::iolist(), From::pid(), #state{}) ->
-                        {noreply, #state{}} | {reply, Reply::any(), #state{}}.
+                        {noreply, #state{}, hibernate | integer()}
+                      | {reply, Reply::any(), #state{}, hibernate | integer()}.
 %% @doc: Sends the given request to redis. If we do not have a
 %% connection, returns error.
 do_request(_Req, _From, #state{socket = undefined} = State) ->
-    {reply, {error, no_connection}, State};
+    {reply, {error, no_connection}, State, ?HIBERNATE_TIMEOUT};
 
 do_request(Req, From, State) ->
     case gen_tcp:send(State#state.socket, Req) of
         ok ->
             NewQueue = queue:in({1, From}, State#state.queue),
-            {noreply, State#state{queue = NewQueue}};
+            {noreply, State#state{queue = NewQueue}, ?HIBERNATE_TIMEOUT};
         {error, Reason} ->
-            {reply, {error, Reason}, State}
+            {reply, {error, Reason}, State, ?HIBERNATE_TIMEOUT}
     end.
 
 -spec do_pipeline(Pipeline::pipeline(), From::pid(), #state{}) ->
-                         {noreply, #state{}} | {reply, Reply::any(), #state{}}.
+                         {noreply, #state{}, hibernate | integer()}
+                       | {reply, Reply::any(), #state{}, hibernate | integer()}.
 %% @doc: Sends the entire pipeline to redis. If we do not have a
 %% connection, returns error.
 do_pipeline(_Pipeline, _From, #state{socket = undefined} = State) ->
-    {reply, {error, no_connection}, State};
+    {reply, {error, no_connection}, State, ?HIBERNATE_TIMEOUT};
 
 do_pipeline(Pipeline, From, State) ->
     case gen_tcp:send(State#state.socket, Pipeline) of
         ok ->
             NewQueue = queue:in({length(Pipeline), From, []}, State#state.queue),
-            {noreply, State#state{queue = NewQueue}};
+            {noreply, State#state{queue = NewQueue}, ?HIBERNATE_TIMEOUT};
         {error, Reason} ->
-            {reply, {error, Reason}, State}
+            {reply, {error, Reason}, State, ?HIBERNATE_TIMEOUT}
     end.
 
 -spec handle_response(Data::binary(), State::#state{}) -> NewState::#state{}.
