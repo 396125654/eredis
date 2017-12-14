@@ -351,8 +351,10 @@ do_sync_command(Socket, Command) ->
 reconnect_loop(Client, #state{reconnect_sleep = ReconnectSleep} = State) ->
     case catch(connect(State)) of
         {ok, #state{socket = Socket}} ->
+            Client ! {connection_ready, Socket},
             gen_tcp:controlling_process(Socket, Client),
-            Client ! {connection_ready, Socket};
+            Msgs = get_all_messages([]),
+            [Client ! M || M <- Msgs];
         {error, _Reason} ->
             timer:sleep(ReconnectSleep),
             reconnect_loop(Client, State);
@@ -362,6 +364,14 @@ reconnect_loop(Client, #state{reconnect_sleep = ReconnectSleep} = State) ->
         _ ->
             timer:sleep(ReconnectSleep),
             reconnect_loop(Client, State)
+    end.
+
+get_all_messages(Acc) ->
+    receive
+        M ->
+            [M | Acc]
+    after 0 ->
+        lists:reverse(Acc)
     end.
 
 read_database(undefined) ->
