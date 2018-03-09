@@ -306,9 +306,11 @@ connect(State) ->
                         ok ->
                             {ok, State#state{socket = Socket}};
                         {error, Reason} ->
+                            gen_tcp:close(Socket),
                             {error, {select_error, Reason}}
                     end;
                 {error, Reason} ->
+                    gen_tcp:close(Socket),
                     {error, {authentication_error, Reason}}
             end;
         {error, Reason} ->
