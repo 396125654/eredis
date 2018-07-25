@@ -1,5 +1,5 @@
 {application, eredis, [
-    {description, "Erlang Redis Client erlang/otp 20.3"},
+    {description, "Erlang Redis Client erlang/otp 18.3"},
     {vsn, git},
     {modules, [eredis, eredis_client, eredis_parser, eredis_sub, eredis_sub_client]},
     {registered, []},
